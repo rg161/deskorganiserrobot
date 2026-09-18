@@ -1,0 +1,18 @@
+Desk Organiser Robot
+
+Members:
+Rohan Gokani - 26072138
+Zhurui Zhou - 25748462
+
+Overview:
+SafeCo proposes a desk-organiser system for office desks, restoring a tidy workspace. 
+One robot arm identifies loose pens on the desk and places them upright into a desk cup, 
+demonstrating vision-guided grasping and orientation control. A second arm clears remaining 
+miscellaneous items (paperclips, sticky notes, cables) into a tray for staff to hand-sort 
+later. A real UR3e performs one arm's task physically, while the second is demonstrated in 
+simulation. Safety features include a proximity sensor detecting a hand re-entering the desk 
+zone, a simulated keep-out barrier, and an accessible e-stop. The system showcases RMRC, 
+collision avoidance and coordinated multi-arm planning. 
+
+Rohan - Kuka KR6 R900 Sixx (pen pickup/dropoff)
+Zhurui - Fanuc LR Mate 200iD (miscellaneous pickup/dropoff)

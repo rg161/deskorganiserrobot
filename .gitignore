@@ -1,0 +1,18 @@
+#Do not commit the following:
+
+#Virtual environment
+venv/
+.venv/
+env/
+robotics_env/
+
+#Python cache files
+__pycache__/
+*.pyc
+
+#VSCode settings
+.vscode/
+
+#OS generated files
+.DS_Store
+Thumbs.db
