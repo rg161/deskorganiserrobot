@@ -3,7 +3,11 @@ import swift
 import spatialmath as sm
 import spatialgeometry as geometry
 from roboticstoolbox import models
+from Robots.KukaKR6 import KukaKR6
 import time
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+#ignore future warnings in terminal
 
 env = swift.Swift()
 env.launch(realtime=True)
@@ -15,10 +19,10 @@ table = geometry.Cuboid(
 )
 env.add(table)
 
-#ur3e placeholder for FanucLR
-robot = models.UR3()
-robot.q = robot.qr
-robot.base = sm.SE3(0, -0.3, 0.4)
+#ur3e placeholder for KuraKR6
+robot = KukaKR6()
+robot.q = robot.qz
+robot.base = sm.SE3(-0.5, -0.3, 0.4)
 env.add(robot)
 
 
