@@ -180,3 +180,5 @@ while running:
     except AttributeError:
         pass
     time.sleep(0.05)
+    #pens initialised on table
+    #update not committing to github since 02/10 morning
