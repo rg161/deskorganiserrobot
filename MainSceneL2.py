@@ -1,5 +1,6 @@
 
 import swift
+import keyboard
 import spatialmath as sm
 import spatialgeometry as geometry
 from roboticstoolbox import models, jtraj
@@ -111,9 +112,9 @@ def move_to_pose(target_pos, steps = 50):
         time.sleep(0.05)
     return True
 
-def pen_init(position):
+def pen_init(position, color):
     #create/add pen at position
-    pen = geometry.Cylinder(radius = 0.005, length = 0.15, pose = sm.SE3(position) * sm.SE3.Rx(np.pi / 2), color = (0.1, 0.1, 0.8, 1))
+    pen = geometry.Cylinder(radius = 0.005, length = 0.15, pose = sm.SE3(position) * sm.SE3.Rx(np.pi / 2), color = color)
     env.add(pen)
     return pen
 
@@ -148,9 +149,34 @@ def pen_pick_and_place(pen, pen_pos):
     move_to_pose(og_pos)
     return True
 
-#loop to keep running
-while True:
-    try:
+#COLOURED PENS!!!
+pens = {
+    "r": {"position": [0.2, -0.15, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen"},
+    "g": {"position": [0.1, 0.05, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen"}, 
+    "b": {"position": [0.3, 0, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen"},  
+}
+for key, pen_info in pens.items():
+    pen_info["object"] = pen_init(pen_info["position"], pen_info["color"])
+    pen_info["picked"] = False
+
+print("Press 'r', 'g' or 'b' to pick up the matching coloured pen.")
+print("Press 'q' to quit.")
+
+#main loop
+running = True
+while running:
+    for key, pen_info in pens.items():
+        if keyboard.is_pressed(key) and not pen_info["picked"]:
+            print(f"Picking up {pen_info['name']}")
+            pen_info["picked"] = True
+            pen_pick_and_place(pen_info["object"], pen_info["position"])
+
+    if keyboard.is_pressed('q'):
+        print("Quitting...")
+        running = False
+
+    try:  
         env.step(0.05)
     except AttributeError:
         pass
+    time.sleep(0.05)
