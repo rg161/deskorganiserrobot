@@ -1,0 +1,43 @@
+Desk Organiser Robot
+
+Members:
+Rohan Gokani - 26072138
+Zhurui Zhou - 25748462
+
+Overview:
+SafeCo proposes a desk-organiser system for office desks, restoring a tidy workspace. 
+One robot arm identifies loose coloured pens on the desk and places them into a tray, 
+demonstrating vision-guided grasping and orientation control. A second arm clears remaining 
+miscellaneous items (paperclips, sticky notes, cables) into a tray for staff to hand-sort 
+later. A real UR3e arm will be used to select and pick-up a coloured pen from the tray to 
+be used by the operator. The pen will be selected by clicking a specified key. Safety features 
+include a proximity sensor detecting a hand re-entering the desk zone, a simulated keep-out 
+barrier, and an accessible e-stop. The system showcases RMRC, collision avoidance and 
+coordinated multi-arm planning. 
+
+
+
+Rohan - Kuka KR6 R900 Sixx (pen pickup/dropoff)
+
+https://my.kuka.com/s/product/kr-6-r900-sixx/01t58000003eVQqAAM?language=en_US&tab=Details
+https://www.researchgate.net/figure/The-DH-parameter-of-KUKA-KR6-R900sixx-manipulator_tbl1_358066894 
+DH PARAMETERS
+Link	a (m)	alpha (rad) 	d (m)
+1	      0	        0	        0
+2	      0	      -π/2	      0
+3	    0.455	      0	        0
+4	    0.035	    -π/2	    0.420
+5	      0	      -π/2	      0
+6	      0	       π/2      0.080
+
+JOINT RANGE
+Axis	Range
+A1	  ±170°
+A2    -190° / 45°
+A3    -120° / 156°
+A4    ±185°
+A5    ±120°
+A6    ±350°
+
+
+Zhurui - Fanuc LR Mate 200iD (miscellaneous pickup/dropoff)
