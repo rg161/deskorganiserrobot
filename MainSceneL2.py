@@ -26,7 +26,7 @@ table = geometry.Cuboid(
 env.add(table)
 
 #Pen Tray
-tray_pos = [-0.2, -0.3, 0.425]
+tray_pos = [0.0, -0.15, 0.425]
 pen_tray = geometry.Cuboid(scale=[0.1, 0.1, 0.03],
                         pose=sm.SE3(tray_pos),
                         color=(0.2, 0.2, 0.2, 1))
@@ -46,19 +46,18 @@ robot.base = sm.SE3(-0.5, -0.3, 0.425)
 def rotation_to_align_z(direction):
 
     z_axis = np.array([0, 0, 1])
-    if np.allclose(direction, z_axis):
+    direction = direction / np.linalg.norm(direction)
+    c = np.dot(z_axis, direction)
+
+    if c > 1-1e-6:
         return np.eye(3)
-    elif np.allclose(direction, -z_axis):
+    if c < -1+1e-6:
         return sm.SO3.Rx(np.pi).R
     v = np.cross(z_axis, direction)
-    c = np.dot(z_axis, direction)
-    vx = np.array([
-        [0, -v[2], v[1]],
-        [v[2], 0, -v[0]],
-        [-v[1], v[0], 0]
-    ])
+    vx = np.array([[0, -v[2], v[1]],
+                     [v[2], 0, -v[0]],
+                        [-v[1], v[0], 0]])
     return np.eye(3) + vx + vx @ vx * (1 / (1 + c))
-
 
 #Use cylinders to represent links as DHrobot will not display on Swift.
 link_poses = robot.fkine_all(robot.q)
@@ -77,10 +76,16 @@ for i in range(len(link_poses) - 1):
     midpoint = (p1 + p2) / 2
     direction = (p2 - p1) / length
     rot = rotation_to_align_z(direction)
-    pose = sm.SE3.Rt(rot, midpoint)
+    
 
+    if not np.all(np.isfinite(rot)) or not np.allclose(rot @ rot.T, np.eye(3), atol=1e-3):
+    
+        cylinders.append(None)
+        continue
+    pose = sm.SE3.Rt(rot, midpoint)
     cyl = geometry.Cylinder(radius=radius, length=length, pose=pose,
-                             color=(0.8, 0.2, 0.1, 1))
+                                 color=(0.8, 0.2, 0.1, 1))
+    
     env.add(cyl)
     cylinders.append(cyl)
 
@@ -98,12 +103,21 @@ def update_cylinders():
         midpoint = (p1 + p2) / 2
         direction = (p2 - p1) / length
         rot = rotation_to_align_z(direction)
+        
+        if not np.all(np.isfinite(rot)) or not np.allclose(rot @ rot.T, np.eye(3), atol=1e-3):
+            continue
+
         cyl.T = sm.SE3.Rt(rot, midpoint)
 
-def move_to_pose(target_pos, steps = 50):
+def move_to_pose(target_pos, steps = 50, carry_object = None, carry_offset = None):
     #Find IK solution for target_pos
     #animate to target_pos (jtraj)
     sol = robot.ikine_LM(target_pos, q0=robot.q, mask=[1, 1, 1, 0, 0, 0])
+
+    
+    if not sol.success:
+        fallback_q0 = [0,np.pi/2, -np.pi/2, 0, 0, 0]
+        sol = robot.ikine_LM(target_pos, q0=fallback_q0, mask = [1, 1, 1, 0, 0, 0])
     if not sol.success:
         print("IK solution not found for target position.")
         return False
@@ -112,6 +126,8 @@ def move_to_pose(target_pos, steps = 50):
     for q in traj.q:
         robot.q = q
         update_cylinders()
+        if carry_object is not None:
+            carry_object.T = robot.fkine(robot.q) * carry_offset
         try:
             env.step(0.05)
         except AttributeError:
@@ -128,39 +144,43 @@ def pen_init(position, color):
 def pen_pick_and_place(pen, pen_pos, drop_pos):
     og_pos = robot.fkine(robot.q)
 
-    above_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.15) * sm.SE3.Rx(np.pi)
+    transit = sm.SE3(pen_pos[0], pen_pos[1], 0.75) * sm.SE3.Rx(np.pi)  # high, safe waypoint
+
+    above_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.3) * sm.SE3.Rx(np.pi)
     at_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.02) * sm.SE3.Rx(np.pi)
 
-    above_tray = sm.SE3(tray_pos[0], tray_pos[1], tray_pos[2] + 0.2) * sm.SE3.Rx(np.pi)
-    at_tray = sm.SE3(tray_pos[0], tray_pos[1], tray_pos[2] + 0.05) * sm.SE3.Rx(np.pi)
+    above_tray = sm.SE3(drop_pos[0], drop_pos[1], drop_pos[2] + 0.2) * sm.SE3.Rx(np.pi)
+    at_tray = sm.SE3(drop_pos[0], drop_pos[1], drop_pos[2] + 0.05) * sm.SE3.Rx(np.pi)
+
 
     print(f"Pen at {pen_pos}, moving to pick up.")
+
+    if not move_to_pose(transit):
+        print("Failed to move to transit position.")
+        return False
     if not move_to_pose(above_pen):
         print("Failed to move above pen.")
         return False
     if not move_to_pose(at_pen):
         print("Failed to move to pen.")
         return False
-    move_to_pose(above_pen)
-    got = True
+    
 
-    move_to_pose(above_tray)
-    if got:
-        pen.T = robot.fkine(robot.q) * sm.SE3(0, 0, -0.075)
+    carry_offset = sm.SE3(0, 0, -0.075)
+    move_to_pose(above_pen, carry_object = pen, carry_offset = carry_offset)
+    move_to_pose(above_tray, carry_object = pen, carry_offset = carry_offset)
+    move_to_pose(at_tray, carry_object = pen, carry_offset = carry_offset)
+    
 
-    move_to_pose(at_tray)
-    if got:
-        pen.T = sm.SE3(drop_pos)
-        got = False
-
+    pen.T = sm.SE3(drop_pos)
     move_to_pose(og_pos)
     return True
 
 #COLOURED PENS!!!
 pens = {
-    "r": {"position": [-0.3, -0.15, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen"},
-    "g": {"position": [-0.4, 0.0, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen"},
-    "b": {"position": [-0.2, 0.05, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen"},
+    "r": {"position": [0.1, -0.3, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen"},
+    "g": {"position": [-0.5, 0.25, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen"},
+    "b": {"position": [0.0, 0.1, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen"},
 }
 for key, pen_info in pens.items():
     pen_info["object"] = pen_init(pen_info["position"], pen_info["color"])
