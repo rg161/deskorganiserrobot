@@ -1,6 +1,6 @@
 
 import swift
-import keyboard
+from pynput import keyboard as pynput_keyboard
 import spatialmath as sm
 import spatialgeometry as geometry
 from roboticstoolbox import models, jtraj
@@ -31,6 +31,13 @@ pen_tray = geometry.Cuboid(scale=[0.1, 0.1, 0.03],
                         pose=sm.SE3(tray_pos),
                         color=(0.2, 0.2, 0.2, 1))
 env.add(pen_tray)
+
+pens_tray_pos = {
+    "r": [tray_pos[0] - 0.025, tray_pos[1], tray_pos[2]],
+    "g": [tray_pos[0], tray_pos[1], tray_pos[2]],
+    "b": [tray_pos[0] + 0.025, tray_pos[1], tray_pos[2]]
+}
+
 
 robot = KukaKR6()
 robot.q = [0, np.pi/2, -np.pi/2, 0, 0, 0]  
@@ -118,14 +125,14 @@ def pen_init(position, color):
     env.add(pen)
     return pen
 
-def pen_pick_and_place(pen, pen_pos):
+def pen_pick_and_place(pen, pen_pos, drop_pos):
     og_pos = robot.fkine(robot.q)
 
     above_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.15) * sm.SE3.Rx(np.pi)
     at_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.02) * sm.SE3.Rx(np.pi)
 
-    above_tray = sm.SE3(tray_pos[0], tray_pos[1], tray_pos[2] + 0.6) * sm.SE3.Rx(np.pi)
-    at_tray = sm.SE3(tray_pos[0], tray_pos[1], tray_pos[2] + 0.45) * sm.SE3.Rx(np.pi)
+    above_tray = sm.SE3(tray_pos[0], tray_pos[1], tray_pos[2] + 0.2) * sm.SE3.Rx(np.pi)
+    at_tray = sm.SE3(tray_pos[0], tray_pos[1], tray_pos[2] + 0.05) * sm.SE3.Rx(np.pi)
 
     print(f"Pen at {pen_pos}, moving to pick up.")
     if not move_to_pose(above_pen):
@@ -143,7 +150,7 @@ def pen_pick_and_place(pen, pen_pos):
 
     move_to_pose(at_tray)
     if got:
-        pen.T = sm.SE3(tray_pos)
+        pen.T = sm.SE3(drop_pos)
         got = False
 
     move_to_pose(og_pos)
@@ -151,27 +158,61 @@ def pen_pick_and_place(pen, pen_pos):
 
 #COLOURED PENS!!!
 pens = {
-    "r": {"position": [0.2, -0.15, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen"},
-    "g": {"position": [0.1, 0.05, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen"}, 
-    "b": {"position": [0.3, 0, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen"},  
+    "r": {"position": [-0.3, -0.15, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen"},
+    "g": {"position": [-0.4, 0.0, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen"},
+    "b": {"position": [-0.2, 0.05, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen"},
 }
 for key, pen_info in pens.items():
     pen_info["object"] = pen_init(pen_info["position"], pen_info["color"])
     pen_info["picked"] = False
 
-print("Press 'r', 'g' or 'b' to pick up the matching coloured pen.")
+print("Press Enter to collect all pens into the tray.")
 print("Press 'q' to quit.")
 
+
+def collect_all_pens():
+    for key, pen_info in pens.items():
+        if pen_info["picked"]:
+            continue
+        print(f"Picking up {pen_info['name']}")
+        pen_pick_and_place(pen_info["object"], pen_info["position"], pens_tray_pos[key])
+        pen_info["picked"] = True
+    print("All pens have been picked up.")
+
+
+#use pynput for keyboard inputs
+pressed_keys = set()
+enter_pressed = False
+
+def on_press(key):
+    global enter_pressed
+    if key == pynput_keyboard.Key.enter:
+        enter_pressed = True
+        return
+    try:
+        pressed_keys.add(key.char)
+    except AttributeError:  
+        pass    
+def on_release(key):
+    try:
+        pressed_keys.discard(key.char)
+    except AttributeError:  
+        pass
+
+key_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+key_listener.start()
+
 #main loop
+            
+collection_complete = False            
 running = True
 while running:
-    for key, pen_info in pens.items():
-        if keyboard.is_pressed(key) and not pen_info["picked"]:
-            print(f"Picking up {pen_info['name']}")
-            pen_info["picked"] = True
-            pen_pick_and_place(pen_info["object"], pen_info["position"])
-
-    if keyboard.is_pressed('q'):
+    if enter_pressed and not collection_complete:
+        enter_pressed = False
+        collect_all_pens() 
+        collection_complete = True
+    
+    if 'q' in pressed_keys:
         print("Quitting...")
         running = False
 
@@ -180,5 +221,6 @@ while running:
     except AttributeError:
         pass
     time.sleep(0.05)
-    #pens initialised on table
-    #update not committing to github since 02/10 morning
+
+key_listener.stop()
+   
