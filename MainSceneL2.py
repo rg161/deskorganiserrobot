@@ -26,22 +26,26 @@ table = geometry.Cuboid(
 env.add(table)
 
 #Pen Tray
-tray_pos = [0.0, -0.15, 0.425]
+tray_pos = [0.02, -0.15, 0.44]
 pen_tray = geometry.Cuboid(scale=[0.1, 0.1, 0.03],
                         pose=sm.SE3(tray_pos),
                         color=(0.2, 0.2, 0.2, 1))
 env.add(pen_tray)
 
 pens_tray_pos = {
-    "r": [tray_pos[0] - 0.025, tray_pos[1], tray_pos[2]],
+    "r": [tray_pos[0] - 0.03, tray_pos[1], tray_pos[2]],
     "g": [tray_pos[0], tray_pos[1], tray_pos[2]],
-    "b": [tray_pos[0] + 0.025, tray_pos[1], tray_pos[2]]
+    "b": [tray_pos[0] + 0.03, tray_pos[1], tray_pos[2]]
 }
 
 
 robot = KukaKR6()
 robot.q = [0, np.pi/2, -np.pi/2, 0, 0, 0]  
 robot.base = sm.SE3(-0.5, -0.3, 0.425)
+
+#tested config that keeps elbow at certan angles
+#avoids arm going under the table for deposit and pickup
+ElbowUp_seed = [2.21916751, -2.95703805, -0.1733883, -1.30056441, 1.36605535, 0.26050853]
 
 def rotation_to_align_z(direction):
 
@@ -57,7 +61,15 @@ def rotation_to_align_z(direction):
     vx = np.array([[0, -v[2], v[1]],
                      [v[2], 0, -v[0]],
                         [-v[1], v[0], 0]])
-    return np.eye(3) + vx + vx @ vx * (1 / (1 + c))
+    rot = np.eye(3) + vx + vx @ vx * (1 / (1 + c))
+    U, _, Vt = np.linalg.svd(rot)
+    rot = U @ Vt
+    if np.linalg.det(rot) < 0:
+        U[:, -1] *= -1
+        rot = U @ Vt
+        rot = U @ Vt
+    return rot
+#to avoid 'valueerror: expected SO3 or rotation matrix'
 
 #Use cylinders to represent links as DHrobot will not display on Swift.
 link_poses = robot.fkine_all(robot.q)
@@ -112,17 +124,35 @@ def update_cylinders():
 def move_to_pose(target_pos, steps = 50, carry_object = None, carry_offset = None):
     #Find IK solution for target_pos
     #animate to target_pos (jtraj)
-    sol = robot.ikine_LM(target_pos, q0=robot.q, mask=[1, 1, 1, 0, 0, 0])
+    #use elbowup config to keep arm above table and avoid collisions
+    #assign a set seed configuration for the elbow up position
+    mask = [1, 1, 1, 0, 0, 0]  # Only consider position for IK
+    IK_seed = 42
 
-    
-    if not sol.success:
-        fallback_q0 = [0,np.pi/2, -np.pi/2, 0, 0, 0]
-        sol = robot.ikine_LM(target_pos, q0=fallback_q0, mask = [1, 1, 1, 0, 0, 0])
-    if not sol.success:
-        print("IK solution not found for target position.")
-        return False
+    def no_dip(q):
+        return min(p.t[2] for p in robot.fkine_all(q)) >= tabletop_h - 0.002
 
-    traj = jtraj(robot.q, sol.q, steps)
+    sol_a = robot.ikine_LM(target_pos, q0 = ElbowUp_seed, mask=mask, seed = IK_seed)
+    if sol_a.success and no_dip(sol_a.q):
+        q_target = sol_a.q
+    else:
+        sol_b = robot.ikine_LM(target_pos, q0=robot.q, mask=mask, seed = IK_seed)
+        if sol_b.success and no_dip(sol_b.q):
+            q_target = sol_b.q
+        elif sol_a.success:
+            q_target = sol_a.q
+        elif sol_b.success:
+            q_target = sol_b.q
+        else:
+            fallback_q0 = [0,np.pi/2, -np.pi/2, 0, 0, 0]
+            sol_c = robot.ikine_LM(target_pos, q0=fallback_q0, mask=mask, seed = IK_seed)
+            if not sol_c.success:
+                print("IK solution not found for target position.")
+                return False
+            q_target = sol_c.q
+
+
+    traj = jtraj(robot.q, q_target, steps)
     for q in traj.q:
         robot.q = q
         update_cylinders()
@@ -135,19 +165,21 @@ def move_to_pose(target_pos, steps = 50, carry_object = None, carry_offset = Non
         time.sleep(0.05)
     return True
 
+
+
 def pen_init(position, color):
     #create/add pen at position
     pen = geometry.Cylinder(radius = 0.005, length = 0.15, pose = sm.SE3(position) * sm.SE3.Rx(np.pi / 2), color = color)
     env.add(pen)
     return pen
 
-def pen_pick_and_place(pen, pen_pos, drop_pos):
+def pen_pick_and_place(pen, pen_pos, drop_pos, clearance = 0.2):
     og_pos = robot.fkine(robot.q)
 
     transit = sm.SE3(pen_pos[0], pen_pos[1], 0.75) * sm.SE3.Rx(np.pi)  # high, safe waypoint
 
     above_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.3) * sm.SE3.Rx(np.pi)
-    at_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + 0.02) * sm.SE3.Rx(np.pi)
+    at_pen = sm.SE3(pen_pos[0], pen_pos[1], pen_pos[2] + clearance) * sm.SE3.Rx(np.pi)
 
     above_tray = sm.SE3(drop_pos[0], drop_pos[1], drop_pos[2] + 0.2) * sm.SE3.Rx(np.pi)
     at_tray = sm.SE3(drop_pos[0], drop_pos[1], drop_pos[2] + 0.05) * sm.SE3.Rx(np.pi)
@@ -166,7 +198,7 @@ def pen_pick_and_place(pen, pen_pos, drop_pos):
         return False
     
 
-    carry_offset = sm.SE3(0, 0, -0.075)
+    carry_offset = sm.SE3(0, 0, -0.075)  # Offset to carry the pen correctly
     move_to_pose(above_pen, carry_object = pen, carry_offset = carry_offset)
     move_to_pose(above_tray, carry_object = pen, carry_offset = carry_offset)
     move_to_pose(at_tray, carry_object = pen, carry_offset = carry_offset)
@@ -178,9 +210,9 @@ def pen_pick_and_place(pen, pen_pos, drop_pos):
 
 #COLOURED PENS!!!
 pens = {
-    "r": {"position": [0.1, -0.3, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen"},
-    "g": {"position": [-0.5, 0.25, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen"},
-    "b": {"position": [0.0, 0.1, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen"},
+    "r": {"position": [0.1, -0.3, tabletop_h + 0.015], "color": (0.9, 0.1, 0.1, 1), "name": "Red Pen", "clearance": 0.02},
+    "g": {"position": [-0.5, 0.25, tabletop_h + 0.015], "color": (0.1, 0.8, 0.1, 1), "name": "Green Pen", "clearance": 0.025},
+    "b": {"position": [0.0, 0.1, tabletop_h + 0.015], "color": (0.1, 0.1, 0.9, 1), "name": "Blue Pen", "clearance": 0.02},
 }
 for key, pen_info in pens.items():
     pen_info["object"] = pen_init(pen_info["position"], pen_info["color"])
@@ -195,7 +227,7 @@ def collect_all_pens():
         if pen_info["picked"]:
             continue
         print(f"Picking up {pen_info['name']}")
-        pen_pick_and_place(pen_info["object"], pen_info["position"], pens_tray_pos[key])
+        pen_pick_and_place(pen_info["object"], pen_info["position"], pens_tray_pos[key], clearance = pen_info["clearance"])
         pen_info["picked"] = True
     print("All pens have been picked up.")
 
