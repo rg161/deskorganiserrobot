@@ -281,6 +281,16 @@ def ur3e_move(target, steps = 50, carry_object = None):
         print("Warning: every UR3e solution goes under the table", np.round(target.t, 3))
         q_target = first
 
+
+    #fix to stop ur3e spinning into kuka
+    #spin opp direction
+    q_target = np.array(q_target, dtype = float)
+    q_target[0] = (q_target[0] + np.pi) % (2 * np.pi) - np.pi
+    if q_target[0] > 0:
+        q_target[0] -= 2 * np.pi
+
+
+
     for q in jtraj(ur3e.q, q_target, steps).q:
         ur3e.q = q
         if carry_object is not None:
