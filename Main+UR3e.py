@@ -28,9 +28,10 @@ env.add(table)
 
 #UR3e robot
 ur3e = UR3e()
-ur3e.base = sm.SE3(-0.5, 0, 0.425)
+ur3e.base = sm.SE3(-0.4, 0.05, 0.425)
 ur3e.add_to_env(env)
-ur3e.q = ([0, 0, 0, 0, 0, 0])  # Initial joint configuration
+UR3E_HOME_Q =[0, 0, 0, 0, 0, 0]
+ur3e.q = UR3E_HOME_Q  # Initial joint configuration
 
 #Pen Tray
 tray_pos = [0.02, -0.15, 0.44]
@@ -237,26 +238,127 @@ def collect_all_pens():
         pen_pick_and_place(pen_info["object"], pen_info["position"], pens_tray_pos[key], clearance = pen_info["clearance"])
         pen_info["picked"] = True
     print("All pens have been picked up.")
+    print("Press 'r' for the red pen, 'g' for the green pen or 'b' for the blue pen to have it delivered.")
+
+### UR3E SECTION!
+
+HANDOFF_POS = [-0.65, 0.2, 0.6] #right front of the desk
+
+EE_DOWN = sm.SE3.Rx(np.pi)  # End-effector pointing downwards
+GRIPPER_OFFSET = sm.SE3(0, 0, 0.05) # Offset to hold the pen correctly
+
+#fix to avoid under tabletop
+def ur3e_path_clear(q_start, q_end, steps = 50):
+    #true if no joint dips below the tabletop while over the table
+    for q in jtraj(q_start, q_end, steps).q:
+        for p in ur3e.fkine_all(q):
+            x, y, z = p.t
+            if abs(x) < 0.6 and abs(y) < 0.4 and z < tabletop_h - 0.002:
+                return False
+    return True
+
+def ur3e_move(target, steps = 50, carry_object = None):
+    mask = [1, 1, 1, 1, 1, 0]
+    rng = np.random.default_rng(0)
+    seeds = [ur3e.q, np.zeros(6), np.array([0, -np.pi/2, np.pi/2, -np.pi/2, -np.pi/2, 0])]
+    seeds += [ur3e.q + rng.uniform(-1, 1, 6) for _ in range(6)]
+
+    q_target = None
+    first = None
+    for s in seeds:
+        sol = ur3e.ikine_LM(target, q0 = s, mask = mask, seed = 42)
+        if not sol.success:
+            continue
+        if first is None:
+            first = sol.q
+        if ur3e_path_clear(ur3e.q, sol.q, steps):
+            q_target = sol.q
+            break
+    if q_target is None:
+        if first is None:
+            print("UR3e IK failed for", np.round(target.t, 3))
+            return False
+        print("Warning: every UR3e solution goes under the table", np.round(target.t, 3))
+        q_target = first
+
+    for q in jtraj(ur3e.q, q_target, steps).q:
+        ur3e.q = q
+        if carry_object is not None:
+            carry_object.T = ur3e.fkine(ur3e.q) * GRIPPER_OFFSET
+        try:
+            env.step(0.05)
+        except AttributeError:
+            pass
+        time.sleep(0.05)
+    return True
+
+def ur3e_return_home(steps = 50):
+    for q in jtraj(ur3e.q, UR3E_HOME_Q, steps).q:
+        ur3e.q = q
+        try:
+            env.step(0.05)
+        except AttributeError:
+            pass
+        time.sleep(0.05)
+
+def deliver_pen(key):
+    info = pens[key]
+    if not info["picked"]:
+        print(f"{info['name']} is not in the tray yet.")
+        return False
+    if info.get("delivered"):
+        print(f"{info['name']} has already been delivered.")
+        return False
+
+    pen = info["object"]
+    slot = pens_tray_pos[key]
+    above = sm.SE3(slot[0], slot[1], slot[2] + 0.25) * EE_DOWN
+    get = sm.SE3(slot[0], slot[1], slot[2] + 0.05) * EE_DOWN
+    out = sm.SE3(*HANDOFF_POS) * EE_DOWN
+
+#delivery process
+    print(f"delivering {info['name']}")
+    if not (ur3e_move(above) and ur3e_move(get)):
+        ur3e_return_home()
+        return False
+
+    ur3e_move(above, carry_object = pen)
+    ur3e_move(out, carry_object = pen)
+
+    time.sleep(2) #time for user to take pen
+    pen.T = sm.SE3(0, 0, -5) #pen gone
+    info["delivered"] = True
+    ur3e_return_home()
+    return True
+
+
 
 
 #use pynput for keyboard inputs
 pressed_keys = set()
 enter_pressed = False
 
+delivery_needed = []
+
 def on_press(key):
+
     global enter_pressed
     if key == pynput_keyboard.Key.enter:
         enter_pressed = True
         return
     try:
         pressed_keys.add(key.char)
-    except AttributeError:  
-        pass    
+
+        if key.char in ("r", "g", "b"):
+            delivery_needed.append(key.char)
+    except AttributeError:
+        pass
 def on_release(key):
     try:
         pressed_keys.discard(key.char)
-    except AttributeError:  
+    except AttributeError:
         pass
+
 
 key_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
 key_listener.start()
@@ -268,8 +370,12 @@ running = True
 while running:
     if enter_pressed and not collection_complete:
         enter_pressed = False
-        collect_all_pens() 
+        collect_all_pens()
         collection_complete = True
+
+    if delivery_needed and collection_complete:
+        deliver_pen(delivery_needed.pop(0))
+        #check if pen r, g, b are needed
     
     if 'q' in pressed_keys:
         print("Quitting...")
