@@ -15,7 +15,19 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 env = swift.Swift()
 env.launch(realtime=True)
 
+"""
+CONTROLS
 
+enter = KUKA pen collection
+r/g/b = UR3e pen delivery
+space = E-Stop (engage/disengage)
+a = reset (after E-Stop is disengaged)
+s = resume (after resume)
+z = person enters/leaves danger area
+o = object placed in robots planned path
+q = quit
+
+"""
 
 #Table
 tabletop_h = 0.425
@@ -128,6 +140,66 @@ def update_cylinders():
             continue
 
         cyl.T = sm.SE3.Rt(rot, midpoint)
+
+
+#Safety System!!
+#initiating safety objects
+HIDE = sm.SE3(0, 0, -5) #put hidden objects below the floor unless called up 
+
+#Equipment models
+def add_box(scale, pos, color):
+    box = geometry.Cuboid(scale = scale, pose = sm.SE3(pos[0], pos[1], pos[2]), color = color)
+    env.add(box)
+    return box
+
+#table legs
+for lx in (-0.55, 0.55):
+    for ly in (-0.35, 0.35):
+        add_box([0.05, 0.05, 0.375], (lx, ly, 0.1875), (0.45, 0.3, 0.15, 1))
+
+#Back guard wall
+#(placed out of reach of KUKA collision y = -0.82, z = 0.94)
+BACK_WALL_Y = -0.93
+add_box([1.2, 0.02, 1.1], (0, BACK_WALL_Y, 0.55), (0.7, 0.7, 0.75, 0.4))
+
+#side guard wall (level with back wall and table edge)
+SIDE_WALL_X = 0.61
+SIDE_WALL_Y = 0.43
+side_l = SIDE_WALL_Y - SIDE_WALL_X
+add_box([0.02, side_l, 1.1], (SIDE_WALL_X, (SIDE_WALL_Y + BACK_WALL_Y) / 2, 0.55), (0.7, 0.7, 0.75, 0.4))
+
+#example green front curtain
+CURTAIN_POSE = sm.SE3(0, 0.43, tabletop_h + 0.30)
+curtain_safe = add_box([1.2, 0.005, 0.5], (0, 0.43, tabletop_h + 0.30), (0.1, 0.9, 0.1, 0.35)) #green
+curtain_unsafe = add_box([1.2, 0.005, 0.5], (0, 0.43, tabletop_h + 0.30), (0.95, 0.1, 0.1, 0.5)) #red
+curtain_unsafe.T = HIDE
+
+#E-STOP button
+add_box([0.08, 0.08, 0.06], (0.5, 0.34, tabletop_h + 0.03), (0.25, 0.25, 0.25, 1))
+estop_button = geometry.Cylinder(radius = 0.03, length = 0.04, pose = sm.SE3(0.5, 0.34, tabletop_h + 0.08), color = (0.9, 0.05, 0.05, 1))
+env.add(estop_button)
+
+#Warning Light
+pole = geometry.Cylinder(radius = 0.01, length = 0.25, pose = sm.SE3(0.55, -0.34, tabletop_h + 0.125), color = (0.15, 0.15, 0.15, 1))
+env.add(pole)
+POLE_POSE = sm.SE3(0.55, -0.34, tabletop_h + 0.28)
+lights = {
+    "green": geometry.Sphere(radius = 0.03, pose = HIDE, color = (0.1, 0.9, 0.1, 1)),
+    "yellow": geometry.Sphere(radius = 0.03, pose = HIDE, color = (1.0, 0.65, 0.0, 1)),
+    "red": geometry.Sphere(radius = 0.03, pose = HIDE, color = (0.95, 0.1, 0.1, 1)),
+}
+for light in lights.values():
+    env.add(light)
+
+#Collision Obstacle
+COLLISION_OBSTACLE = [0.1, 0.1, 0.15]
+obstacle = geometry.Cuboid(scale = COLLISION_OBSTACLE, pose = HIDE, color = (1.0, 0.5, 0.0, 1))
+env.add(obstacle)
+
+
+
+
+
 
 def move_to_pose(target_pos, steps = 50, carry_object = None, carry_offset = None):
     #Find IK solution for target_pos
