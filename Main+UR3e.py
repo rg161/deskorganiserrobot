@@ -22,7 +22,7 @@ enter = KUKA pen collection
 r/g/b = UR3e pen delivery
 space = E-Stop (engage/disengage)
 a = reset (after E-Stop is disengaged)
-s = resume (after resume)
+s = resume (after reset)
 z = person enters/leaves danger area
 o = object placed in robots planned path
 q = quit
@@ -165,11 +165,11 @@ add_box([1.2, 0.02, 1.1], (0, BACK_WALL_Y, 0.55), (0.7, 0.7, 0.75, 0.4))
 #side guard wall (level with back wall and table edge)
 SIDE_WALL_X = 0.61
 SIDE_WALL_Y = 0.43
-side_l = SIDE_WALL_Y - SIDE_WALL_X
+side_l = SIDE_WALL_Y - BACK_WALL_Y
 add_box([0.02, side_l, 1.1], (SIDE_WALL_X, (SIDE_WALL_Y + BACK_WALL_Y) / 2, 0.55), (0.7, 0.7, 0.75, 0.4))
 
 #example green front curtain
-CURTAIN_POSE = sm.SE3(0, 0.43, tabletop_h + 0.30)
+CURTAIN_POSE = sm.SE3(0, 0.43, tabletop_h + 0.250)
 curtain_safe = add_box([1.2, 0.005, 0.5], (0, 0.43, tabletop_h + 0.30), (0.1, 0.9, 0.1, 0.35)) #green
 curtain_unsafe = add_box([1.2, 0.005, 0.5], (0, 0.43, tabletop_h + 0.30), (0.95, 0.1, 0.1, 0.5)) #red
 curtain_unsafe.T = HIDE
@@ -197,7 +197,167 @@ obstacle = geometry.Cuboid(scale = COLLISION_OBSTACLE, pose = HIDE, color = (1.0
 env.add(obstacle)
 
 
+#SAFETY SYSTEM STATE
+ 
+#RUNNING - normal operation
 
+#SAFETY_STOP - danger zone entered or collision detected
+
+#ESTOP - E-stop engaged
+
+#AWAITING_RESET - E-stop released, awaiting 'a'
+
+#AWAITING_RESUME - 'a' pressed, awaiting 's'
+
+state = "RUNNING"
+stop_reason = ""
+estop = False
+in_zone = False
+obstacle_in = False
+obstacle_pos = np.zeros(3)
+
+COLLISION_MARGIN = 0.05 #stop before collision
+FUTURE_FRAMES = 15 #check 15 frames ahead the path
+
+
+active_motion = None
+ 
+def start_motion(robot_obj, qs):
+    global active_motion
+    active_motion = {"robot": robot_obj, "q": qs, "idx": 0}
+ 
+def end_motion():
+    global active_motion
+    active_motion = None
+ 
+def read_physical_estop():
+    return False
+ 
+def set_state(new_state, reason = ""):
+    global state, stop_reason
+    if new_state != state or reason != stop_reason:
+        state, stop_reason = new_state, reason
+        print(f"[SAFETY] {state}" + (f" - {reason}" if reason else ""))
+ 
+def sample_links(poses, n = 6):
+    P = [p.t for p in poses]
+    pts = []
+    for a, b in zip(P[:-1], P[1:]):
+        for t in np.linspace(0, 1, n):
+            pts.append(a + (b - a) * t)
+    return np.array(pts)
+ 
+def predicted_collision():
+    #True if the next part of the robot's planned path hits the obstacle
+    if not obstacle_in or active_motion is None:
+        return False
+    half = np.array(COLLISION_OBSTACLE) / 2 + COLLISION_MARGIN
+    qs = active_motion["q"]
+    start = active_motion["idx"]
+    for k in range(start, min(start + FUTURE_FRAMES, len(qs)), 2):
+        pts = sample_links(active_motion["robot"].fkine_all(qs[k]), 5)
+        if np.any(np.all(np.abs(pts - obstacle_pos) <= half, axis = 1)):
+            return True
+    return False
+ 
+def toggle_obstacle():
+    global obstacle_in, obstacle_pos
+    if obstacle_in:
+        obstacle_in = False
+        obstacle.T = HIDE
+        print("[SENSOR] Obstacle removed")
+    elif active_motion is None:
+        print("[SENSOR] No motion in progress - start motion first, then press 'o' to drop an obstacle in its path")
+    else:
+        qs = active_motion["q"]
+        k = min(active_motion["idx"] + 25, len(qs) - 1)
+        pos = np.array(active_motion["robot"].fkine(qs[k]).t)
+        #never drop the obstacle on top of the robot - it must be ahead in the path
+        half = np.array(COLLISION_OBSTACLE) / 2 + COLLISION_MARGIN
+        now = sample_links(active_motion["robot"].fkine_all(qs[active_motion["idx"]]), 5)
+        if np.any(np.all(np.abs(now - pos) <= half, axis = 1)):
+            print("[SENSOR] Too close to the robot to place the obstacle - wait, then try again")
+            return
+        obstacle_pos = pos
+        obstacle.T = sm.SE3(obstacle_pos[0], obstacle_pos[1], obstacle_pos[2])
+        obstacle_in = True
+        print("[SENSOR] Obstacle placed in the planned path")
+ 
+def update_safety(events):
+    global estop, in_zone
+ 
+    #1. inputs that change the world
+    for ev in events:
+        if ev == "estop_toggle":
+            estop = not estop
+        elif ev == "zone":
+            in_zone = not in_zone
+            print("[SENSOR] Person entered the danger zone" if in_zone else "[SENSOR] danger zone clear")
+        elif ev == "obstacle":
+            toggle_obstacle()
+ 
+    # 2. e-stop prioritised - dont move until released/reset
+    estop_in = estop or read_physical_estop()
+    if estop_in:
+        set_state("ESTOP", "e-stop pressed")
+    elif state == "ESTOP":
+        set_state("AWAITING_RESET", "e-stop released - press 'a' to reset")
+ 
+    # 3. safety operator actions (needs reset and resume)
+    #print reasonings for clarity
+    for ev in events:
+        if ev == "reset":
+            if estop_in:
+                print("[SAFETY] Release the e-stop before resetting")
+            elif state == "AWAITING_RESET":
+                set_state("AWAITING_RESUME", "reset acknowledged - press 's' to resume")
+            else:
+                print("[SAFETY] Nothing to reset")
+        elif ev == "resume":
+            if state == "AWAITING_RESET":
+                print("[SAFETY] Reset first (press 'a')")
+            elif state != "AWAITING_RESUME":
+                print(f"[SAFETY] Cannot resume from {state}")
+            elif in_zone:
+                print("[SAFETY] Cannot resume - unsafe zone still occupied")
+            elif predicted_collision():
+                print("[SAFETY] Cannot resume - planned path is still blocked")
+            else:
+                set_state("RUNNING")
+ 
+    # 4. safety stops from the safety sensors
+    if state == "RUNNING":
+        if in_zone:
+            set_state("SAFETY_STOP", "person in unsafe zone")
+        elif predicted_collision():
+            set_state("SAFETY_STOP", "collision predicted in planned path")
+    elif state == "SAFETY_STOP":
+        #safety stops clear by themselves once the hazard is gone
+        if stop_reason.startswith("person") and not in_zone:
+            set_state("RUNNING", "zone clear - resuming")
+        elif stop_reason.startswith("collision") and not predicted_collision():
+            set_state("RUNNING", "path clear - resuming")
+ 
+equip_signature = None
+ 
+def update_equipment():
+    # warning light colour and light-curtain beam follow the safety state
+    global equip_signature
+    if state == "RUNNING":
+        light = "green"
+    elif state in ("SAFETY_STOP", "AWAITING_RESUME"):
+        light = "yellow"
+    else:
+        light = "red"
+    signature = (light, in_zone) #checks the colour and if anything is triggered
+    if signature == equip_signature:
+        return
+    equip_signature = signature
+    for name, obj in lights.items():
+        obj.T = POLE_POSE if name == light else HIDE
+    curtain_safe.T = HIDE if in_zone else CURTAIN_POSE
+    curtain_unsafe.T = CURTAIN_POSE if in_zone else HIDE
+ 
 
 
 
@@ -233,16 +393,15 @@ def move_to_pose(target_pos, steps = 50, carry_object = None, carry_offset = Non
 
 
     traj = jtraj(robot.q, q_target, steps)
-    for q in traj.q:
+    start_motion(robot, traj.q)
+    for i, q in enumerate(traj.q):
+        active_motion["idx"] = i
         robot.q = q
         update_cylinders()
         if carry_object is not None:
             carry_object.T = robot.fkine(robot.q) * carry_offset
-        try:
-            env.step(0.05)
-        except AttributeError:
-            pass
-        time.sleep(0.05)
+        yield
+    end_motion()
     return True
 
 
@@ -253,7 +412,9 @@ def pen_init(position, color):
     env.add(pen)
     return pen
 
+#yield from -> run motions frame by frame to allow for stoppage
 def pen_pick_and_place(pen, pen_pos, drop_pos, clearance = 0.2):
+    
     og_pos = robot.fkine(robot.q)
 
     transit = sm.SE3(pen_pos[0], pen_pos[1], 0.75) * sm.SE3.Rx(np.pi)  # high, safe waypoint
@@ -267,25 +428,23 @@ def pen_pick_and_place(pen, pen_pos, drop_pos, clearance = 0.2):
 
     print(f"Pen at {pen_pos}, moving to pick up.")
 
-    if not move_to_pose(transit):
+    if not (yield from move_to_pose(transit)):
         print("Failed to move to transit position.")
         return False
-    if not move_to_pose(above_pen):
+    if not (yield from move_to_pose(above_pen)):
         print("Failed to move above pen.")
         return False
-    if not move_to_pose(at_pen):
+    if not (yield from move_to_pose(at_pen)):
         print("Failed to move to pen.")
         return False
-    
 
     carry_offset = sm.SE3(0, 0, -0.075)  # Offset to carry the pen correctly
-    move_to_pose(above_pen, carry_object = pen, carry_offset = carry_offset)
-    move_to_pose(above_tray, carry_object = pen, carry_offset = carry_offset)
-    move_to_pose(at_tray, carry_object = pen, carry_offset = carry_offset)
-    
+    yield from move_to_pose(above_pen, carry_object = pen, carry_offset = carry_offset)
+    yield from move_to_pose(above_tray, carry_object = pen, carry_offset = carry_offset)
+    yield from move_to_pose(at_tray, carry_object = pen, carry_offset = carry_offset)
 
     pen.T = sm.SE3(drop_pos)
-    move_to_pose(og_pos)
+    yield from move_to_pose(og_pos)
     return True
 
 #COLOURED PENS!!!
@@ -299,22 +458,30 @@ for key, pen_info in pens.items():
     pen_info["picked"] = False
 
 print("Press Enter to collect all pens into the tray.")
+print("Safety controls:")
+print("  space = E-Stop (engage/disengage)")
+print("  a     = reset (after E-Stop is released)")
+print("  s     = resume (after reset)")
+print("  z     = person enters/leaves the danger area")
+print("  o     = place an object in the robot's planned path")
 print("Press 'q' to quit.")
 
-
+collection_complete = False
 def collect_all_pens():
     for key, pen_info in pens.items():
         if pen_info["picked"]:
             continue
         print(f"Picking up {pen_info['name']}")
-        pen_pick_and_place(pen_info["object"], pen_info["position"], pens_tray_pos[key], clearance = pen_info["clearance"])
+        yield from pen_pick_and_place(pen_info["object"], pen_info["position"], pens_tray_pos[key], clearance = pen_info["clearance"])
         pen_info["picked"] = True
+        collection_complete = True
     print("All pens have been picked up.")
     print("Press 'r' for the red pen, 'g' for the green pen or 'b' for the blue pen to have it delivered.")
 
 ### UR3E SECTION!
 
 HANDOFF_POS = [-0.65, 0.2, 0.6] #right front of the desk
+HANDOFF_HOLD_FRAMES = 40
 
 EE_DOWN = sm.SE3.Rx(np.pi)  # End-effector pointing downwards
 GRIPPER_OFFSET = sm.SE3(0, 0, 0.05) # Offset to hold the pen correctly
@@ -363,25 +530,25 @@ def ur3e_move(target, steps = 50, carry_object = None):
 
 
 
-    for q in jtraj(ur3e.q, q_target, steps).q:
+    traj = jtraj(ur3e.q, q_target, steps)
+    start_motion(ur3e, traj.q)
+    for i, q in enumerate(traj.q):
+        active_motion["idx"] = i
         ur3e.q = q
         if carry_object is not None:
             carry_object.T = ur3e.fkine(ur3e.q) * GRIPPER_OFFSET
-        try:
-            env.step(0.05)
-        except AttributeError:
-            pass
-        time.sleep(0.05)
+        yield
+    end_motion()
     return True
 
 def ur3e_return_home(steps = 50):
-    for q in jtraj(ur3e.q, UR3E_HOME_Q, steps).q:
+    traj = jtraj(ur3e.q, UR3E_HOME_Q, steps)
+    start_motion(ur3e, traj.q)
+    for i, q in enumerate(traj.q):
+        active_motion["idx"] = i
         ur3e.q = q
-        try:
-            env.step(0.05)
-        except AttributeError:
-            pass
-        time.sleep(0.05)
+        yield
+    end_motion()
 
 def deliver_pen(key):
     info = pens[key]
@@ -400,17 +567,21 @@ def deliver_pen(key):
 
 #delivery process
     print(f"delivering {info['name']}")
-    if not (ur3e_move(above) and ur3e_move(get)):
-        ur3e_return_home()
+    ok = yield from ur3e_move(above)
+    if ok:
+        ok = yield from ur3e_move(get)
+    if not ok:
+        yield from ur3e_return_home()
         return False
 
-    ur3e_move(above, carry_object = pen)
-    ur3e_move(out, carry_object = pen)
+    yield from ur3e_move(above, carry_object = pen)
+    yield from ur3e_move(out, carry_object = pen)
 
-    time.sleep(2) #time for user to take pen
+    for _ in range(HANDOFF_HOLD_FRAMES): #time for user to take pen
+        yield
     pen.T = sm.SE3(0, 0, -5) #pen gone
     info["delivered"] = True
-    ur3e_return_home()
+    yield from ur3e_return_home()
     return True
 
 
@@ -421,18 +592,27 @@ pressed_keys = set()
 enter_pressed = False
 
 delivery_needed = []
+key_events = []
+KEY_EVENTS = {"a": "reset", "s": "resume", "z": "zone", "o": "obstacle"}
 
 def on_press(key):
-
     global enter_pressed
     if key == pynput_keyboard.Key.enter:
         enter_pressed = True
+        #RUN KUKA
+        return
+    if key == pynput_keyboard.Key.space:
+        key_events.append("estop_toggle")
+        #TRIGGER ESTOP
         return
     try:
         pressed_keys.add(key.char)
-
         if key.char in ("r", "g", "b"):
             delivery_needed.append(key.char)
+            #RUN UR3E
+        elif key.char in KEY_EVENTS:
+            key_events.append(KEY_EVENTS[key.char])
+            #RUN a, s, z, or o
     except AttributeError:
         pass
 def on_release(key):
@@ -445,29 +625,47 @@ def on_release(key):
 key_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
 key_listener.start()
 
-#main loop
+
+
+#adjusted main loop for safety system inputs
             
-collection_complete = False            
+active_task = None
 running = True
 while running:
-    if enter_pressed and not collection_complete:
-        enter_pressed = False
-        collect_all_pens()
-        collection_complete = True
+    events = []
+    while key_events:
+        events.append(key_events.pop(0))
+    update_safety(events)
 
-    if delivery_needed and collection_complete:
-        deliver_pen(delivery_needed.pop(0))
-        #check if pen r, g, b are needed
-    
+    if enter_pressed:
+        enter_pressed = False
+        if state != "RUNNING":
+            print(f"[SAFETY] Cannot start - system is {state}")
+        elif active_task is None and not collection_complete:
+            #collect pens (kuka)
+            active_task = collect_all_pens()
+
+    if state == "RUNNING":
+        if active_task is None and collection_complete and delivery_needed:
+            active_task = deliver_pen(delivery_needed.pop(0))
+            #Deliver pens to user (ur3e)
+        if active_task is not None:
+            try:
+                next(active_task)
+            except StopIteration:
+                active_task = None
+
+    update_equipment()
+
     if 'q' in pressed_keys:
         print("Quitting...")
         running = False
+        #quit program
 
-    try:  
+    try:
         env.step(0.05)
     except AttributeError:
         pass
     time.sleep(0.05)
 
 key_listener.stop()
-   
