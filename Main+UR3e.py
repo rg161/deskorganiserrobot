@@ -14,6 +14,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 env = swift.Swift()
 env.launch(realtime=True)
+#keep simulator running
 
 """
 CONTROLS
@@ -38,14 +39,15 @@ table = geometry.Cuboid(
 )
 env.add(table)
 
-#UR3e robot
+#UR3e robot (from ir_support)
 ur3e = UR3e()
 ur3e.base = sm.SE3(-0.4, 0.05, 0.425)
 ur3e.add_to_env(env)
 UR3E_HOME_Q =[0, 0, 0, 0, 0, 0]
+#arm returns here after each delivery
 ur3e.q = UR3E_HOME_Q  # Initial joint configuration
 
-#Pen Tray
+#Pen Tray (hand off point between the two robots)
 tray_pos = [0.02, -0.15, 0.44]
 pen_tray = geometry.Cuboid(scale=[0.1, 0.1, 0.03],
                         pose=sm.SE3(tray_pos),
@@ -53,45 +55,58 @@ pen_tray = geometry.Cuboid(scale=[0.1, 0.1, 0.03],
 env.add(pen_tray)
 
 pens_tray_pos = {
-    "r": [tray_pos[0] - 0.03, tray_pos[1], tray_pos[2]],
-    "g": [tray_pos[0], tray_pos[1], tray_pos[2]],
-    "b": [tray_pos[0] + 0.03, tray_pos[1], tray_pos[2]]
+    "r": [tray_pos[0] - 0.03, tray_pos[1], tray_pos[2]],    #left
+    "g": [tray_pos[0], tray_pos[1], tray_pos[2]],           #middle
+    "b": [tray_pos[0] + 0.03, tray_pos[1], tray_pos[2]]     #right
 }
 
 
-robot = KukaKR6()
+robot = KukaKR6() #KUKA KR6 R900 sixx using researched DH Parameters from robot website
 robot.q = [0, np.pi/2, -np.pi/2, 0, 0, 0]  
-robot.base = sm.SE3(-0.5, -0.3, 0.425)
+# initial position
+robot.base = sm.SE3(-0.5, -0.3, 0.425) #right back corner
 
 #tested config that keeps elbow at certan angles
 #avoids arm going under the table for deposit and pickup
 ElbowUp_seed = [2.21916751, -2.95703805, -0.1733883, -1.30056441, 1.36605535, 0.26050853]
+#joint angle that avoids going under the table
 
+#creates the rotation that directs a cylinders z-axis along the link direction towards the next one
 def rotation_to_align_z(direction):
 
     z_axis = np.array([0, 0, 1])
     direction = direction / np.linalg.norm(direction)
+    #converts to direction to unit vector
     c = np.dot(z_axis, direction)
+    #cos of angle between original up facing and link direction
 
     if c > 1-1e-6:
         return np.eye(3)
+        #if c close to 1 then no rotation needed
     if c < -1+1e-6:
+        #if c close to -1 flip by 180 deg
         return sm.SO3.Rx(np.pi).R
     v = np.cross(z_axis, direction)
-    vx = np.array([[0, -v[2], v[1]],
+    vx = np.array([[0, -v[2], v[1]], #v as a 3x3 matrix
                      [v[2], 0, -v[0]],
                         [-v[1], v[0], 0]])
-    rot = np.eye(3) + vx + vx @ vx * (1 / (1 + c))
+    rot = np.eye(3) + vx + vx @ vx * (1 / (1 + c)) #rotation formula turns one vector to another
     U, _, Vt = np.linalg.svd(rot)
     rot = U @ Vt
     if np.linalg.det(rot) < 0:
         U[:, -1] *= -1
         rot = U @ Vt
         rot = U @ Vt
+        #splits into parts, rebuilds the nearest perfect rotation
     return rot
 #to avoid 'valueerror: expected SO3 or rotation matrix'
 
+
+
 #Use cylinders to represent links as DHrobot will not display on Swift.
+#DH model, only defines joint frames
+#swift cant draw 3D shape, sub with cylinder estimates
+#Toolbox had KR5 but DH parameters didn't align
 link_poses = robot.fkine_all(robot.q)
 cylinders = []
 radius = 0.02
@@ -555,6 +570,32 @@ def ur3e_return_home(steps = 50):
         yield
     end_motion()
 
+
+#RMRC
+def ur3e_rmrc_z(z_target, speed = 0.08, dt = 0.05, carry_object = None):
+    """RMRC: move the tool in a straight vertical line at a set speed
+    each step: joint speeds = pinv(Jacobian) * wanted hand velocity, then q = q + qdot * dt"""
+    dz = z_target - ur3e.fkine(ur3e.q).t[2]
+    n = int(np.ceil(abs(dz) / (speed * dt)))
+    if n == 0:
+        return True
+    v = np.array([0, 0, np.sign(dz) * speed, 0, 0, 0]) #wanted hand velocity (vx vy vz wx wy wz), angular = 0 keeps the tool pointing down
+    q = np.array(ur3e.q, dtype = float)
+    path = []
+    for _ in range(n):
+        qd = np.linalg.pinv(ur3e.jacob0(q)) @ v #pinv copes with near-singular poses
+        q = q + qd * dt
+        path.append(q.copy())
+    start_motion(ur3e, path) #share the path so the collision look-ahead can see it
+    for i, q in enumerate(path):
+        active_motion["idx"] = i
+        ur3e.q = q
+        if carry_object is not None:
+            carry_object.T = ur3e.fkine(ur3e.q) * GRIPPER_OFFSET
+        yield
+    end_motion()
+    return True
+
 def deliver_pen(key):
     info = pens[key]
     if not info["picked"]:
@@ -574,12 +615,12 @@ def deliver_pen(key):
     print(f"delivering {info['name']}")
     ok = yield from ur3e_move(above)
     if ok:
-        ok = yield from ur3e_move(get)
+        ok = yield from ur3e_rmrc_z(get.t[2]) #RMRC: straight down onto the pen
     if not ok:
         yield from ur3e_return_home()
         return False
 
-    yield from ur3e_move(above, carry_object = pen)
+    yield from ur3e_rmrc_z(above.t[2], carry_object = pen) #RMRC: straight back up with the pen
     yield from ur3e_move(out, carry_object = pen)
 
     for _ in range(HANDOFF_HOLD_FRAMES): #time for user to take pen
