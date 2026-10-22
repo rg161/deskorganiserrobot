@@ -177,6 +177,8 @@ curtain_unsafe.T = HIDE
 #E-STOP button
 add_box([0.08, 0.08, 0.06], (0.5, 0.34, tabletop_h + 0.03), (0.25, 0.25, 0.25, 1))
 estop_button = geometry.Cylinder(radius = 0.03, length = 0.04, pose = sm.SE3(0.5, 0.34, tabletop_h + 0.08), color = (0.9, 0.05, 0.05, 1))
+ESTOP_UP = sm.SE3(0.5, 0.34, tabletop_h + 0.08)
+ESTOP_DOWN = sm.SE3(0.5, 0.34, tabletop_h + 0.05)
 env.add(estop_button)
 
 #Warning Light
@@ -296,19 +298,19 @@ def update_safety(events):
         elif ev == "obstacle":
             toggle_obstacle()
  
-    # 2. e-stop prioritised - dont move until released/reset
+    # 2. E-Stop prioritised - dont move until released/reset
     estop_in = estop or read_physical_estop()
     if estop_in:
-        set_state("ESTOP", "e-stop pressed")
+        set_state("ESTOP", "E-Stop pressed")
     elif state == "ESTOP":
-        set_state("AWAITING_RESET", "e-stop released - press 'a' to reset")
+        set_state("AWAITING_RESET", "E-Stop released - press 'a' to reset")
  
     # 3. safety operator actions (needs reset and resume)
     #print reasonings for clarity
     for ev in events:
         if ev == "reset":
             if estop_in:
-                print("[SAFETY] Release the e-stop before resetting")
+                print("[SAFETY] Release the E-Stop before resetting")
             elif state == "AWAITING_RESET":
                 set_state("AWAITING_RESUME", "reset acknowledged - press 's' to resume")
             else:
@@ -328,7 +330,7 @@ def update_safety(events):
     # 4. safety stops from the safety sensors
     if state == "RUNNING":
         if in_zone:
-            set_state("SAFETY_STOP", "person in unsafe zone")
+            set_state("SAFETY_STOP", "person in danger zone")
         elif predicted_collision():
             set_state("SAFETY_STOP", "collision predicted in planned path")
     elif state == "SAFETY_STOP":
@@ -349,7 +351,8 @@ def update_equipment():
         light = "yellow"
     else:
         light = "red"
-    signature = (light, in_zone) #checks the colour and if anything is triggered
+    pressed = estop or read_physical_estop()
+    signature = (light, in_zone, pressed) #checks the colour, if anything is triggered, and button press
     if signature == equip_signature:
         return
     equip_signature = signature
@@ -357,6 +360,7 @@ def update_equipment():
         obj.T = POLE_POSE if name == light else HIDE
     curtain_safe.T = HIDE if in_zone else CURTAIN_POSE
     curtain_unsafe.T = CURTAIN_POSE if in_zone else HIDE
+    estop_button.T = ESTOP_DOWN if pressed else ESTOP_UP
  
 
 
@@ -464,10 +468,11 @@ print("  a     = reset (after E-Stop is released)")
 print("  s     = resume (after reset)")
 print("  z     = person enters/leaves the danger area")
 print("  o     = place an object in the robot's planned path")
-print("Press 'q' to quit.")
+print("  q     = quit")
 
 collection_complete = False
 def collect_all_pens():
+    global collection_complete
     for key, pen_info in pens.items():
         if pen_info["picked"]:
             continue
@@ -626,8 +631,32 @@ key_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release
 key_listener.start()
 
 
+#Adding GUI on swift for e-stop simulation
+env.add(swift.Button(lambda *a: key_events.append("estop_toggle"), desc = "E-Stop (engage/disengage)"))
+env.add(swift.Button(lambda *a: key_events.append("reset"), desc = "RESET"))
+env.add(swift.Button(lambda *a: key_events.append("resume"), desc = "RESUME"))
 
-#adjusted main loop for safety system inputs
+status_label = swift.Label("STATE: RUNNING")
+env.add(status_label)
+last_status = ""
+
+def update_gui():
+    global last_status
+    text = f"STATE: {state}"
+    if stop_reason:
+        text += f" - {stop_reason}"
+    if in_zone and "person" not in stop_reason:
+        text += f" | WARNING: Person in danger zone."
+    if obstacle_in and "collision" not in stop_reason:
+        text += f" | WARNING: Obstacle in path."
+    if text != last_status:
+        last_status = text
+        status_label.desc = text
+    
+
+
+
+#adjusted MAIN LOOP for safety system inputs
             
 active_task = None
 running = True
@@ -656,6 +685,7 @@ while running:
                 active_task = None
 
     update_equipment()
+    update_gui()
 
     if 'q' in pressed_keys:
         print("Quitting...")
