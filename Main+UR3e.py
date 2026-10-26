@@ -9,6 +9,7 @@ import spatialmath as sm
 import time
 import warnings
 from ir_support.robots import UR3e
+from ir_support_extra_parts.parts import part_mesh
 warnings.filterwarnings("ignore", category=FutureWarning)
 #ignore future warnings in terminal
 
@@ -131,7 +132,7 @@ for i in range(len(link_poses) - 1):
         continue
     pose = sm.SE3.Rt(rot, midpoint)
     cyl = geometry.Cylinder(radius=radius, length=length, pose=pose,
-                                 color=(0.8, 0.2, 0.1, 1))
+                            color=(1.0, 0.5, 0.0, 1))
     
     env.add(cyl)
     cylinders.append(cyl)
@@ -167,6 +168,11 @@ def add_box(scale, pos, color):
     env.add(box)
     return box
 
+#textured floor (wood planks made from alternating strips)
+FLOOR_COLORS = [(0.55, 0.40, 0.25, 1), (0.48, 0.34, 0.20, 1)]
+for i in range(-10, 10):
+    add_box([3.0, 0.15, 0.01], (0, i * 0.15 + 0.075, 0.0), FLOOR_COLORS[i % 2])
+
 #table legs
 for lx in (-0.55, 0.55):
     for ly in (-0.35, 0.35):
@@ -174,14 +180,22 @@ for lx in (-0.55, 0.55):
 
 #Back guard wall
 #(placed out of reach of KUKA collision y = -0.82, z = 0.94)
+#extended along -x to just past the KUKA's start-pose reach (x = -0.92)
 BACK_WALL_Y = -0.93
-add_box([1.2, 0.02, 1.1], (0, BACK_WALL_Y, 0.55), (0.7, 0.7, 0.75, 0.4))
-
-#side guard wall (level with back wall and table edge)
+RIGHT_WALL_X = -1.02
 SIDE_WALL_X = 0.61
 SIDE_WALL_Y = 0.43
 side_l = SIDE_WALL_Y - BACK_WALL_Y
-add_box([0.02, side_l, 1.1], (SIDE_WALL_X, (SIDE_WALL_Y + BACK_WALL_Y) / 2, 0.55), (0.7, 0.7, 0.75, 0.4))
+add_box([SIDE_WALL_X - RIGHT_WALL_X, 0.02, 1.1], ((SIDE_WALL_X + RIGHT_WALL_X) / 2, BACK_WALL_Y, 0.55), (0.7, 0.7, 0.75, 0.4))
+
+#side guard walls (level with back wall, at the table edge and just past the KUKA's reach)
+for wx in (SIDE_WALL_X, RIGHT_WALL_X):
+    add_box([0.02, side_l, 1.1], (wx, (SIDE_WALL_Y + BACK_WALL_Y) / 2, 0.55), (0.7, 0.7, 0.75, 0.4))
+
+caution = part_mesh("CautionSign")
+caution.scale = [0.5, 0.5, 0.5]
+caution.T = sm.SE3(-0.81, 0.35, 0) * sm.SE3.Rz(np.pi / 2)
+env.add(caution)
 
 #example green front curtain
 CURTAIN_POSE = sm.SE3(0, 0.43, tabletop_h + 0.250)
@@ -210,7 +224,7 @@ for light in lights.values():
 
 #Collision Obstacle
 COLLISION_OBSTACLE = [0.1, 0.1, 0.15]
-obstacle = geometry.Cuboid(scale = COLLISION_OBSTACLE, pose = HIDE, color = (1.0, 0.5, 0.0, 1))
+obstacle = geometry.Cuboid(scale = COLLISION_OBSTACLE, pose = HIDE, color = (0.6, 0.1, 0.8, 1.0))
 env.add(obstacle)
 
 
